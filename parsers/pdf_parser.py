@@ -107,7 +107,16 @@ def save_to_db(df, month_label, db_path):
     df = df.copy()
     df["month"] = month_label
     with sqlite3.connect(db_path) as conn:
+        try:
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM transactions WHERE month = ?", (month_label,)
+            )
+            if cursor.fetchone()[0] > 0:
+                return 0          # month already loaded — skip silently
+        except sqlite3.OperationalError:
+            pass                  # table doesn't exist yet; first-ever insert
         df.to_sql("transactions", conn, if_exists="append", index=False)
+        return len(df)
 
 if __name__ == "__main__":
     month = "Dec"

@@ -25,7 +25,7 @@ def run_preprocessing(db_path=DB_PATH, out_csv=None):
 
     split_vendor = df['Vendor'].str.split('*', n=1, expand=True)
     df['Vendor'] = split_vendor[0].str.strip()
-    df['Details'] = split_vendor[1].str.strip()
+    df['Details'] = split_vendor[1].str.strip() if 1 in split_vendor.columns else pd.Series("", index=df.index)
 
     df['Details'] = df['Details'].replace('', 'No Details')
     df['Vendor'] = df['Vendor'].str.replace('Ezypay', 'ANYTIME FITNESS')
