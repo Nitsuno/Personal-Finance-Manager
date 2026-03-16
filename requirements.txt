@@ -2,3 +2,6 @@ pdfplumber
 pandas
 streamlit
 scikit-learn
+altair
+joblib
+fpdf2

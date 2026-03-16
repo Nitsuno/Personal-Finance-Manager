@@ -13,6 +13,7 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = BASE_DIR / "db" / "statements.db"
 TO_LABEL_CSV = DATA_DIR / "to_label.csv"
 LABELED_CSV = DATA_DIR / "labeled.csv"
+BUDGET_JSON = DATA_DIR / "budget_limits.json"
 
 CATEGORIES = [
     "Dining & Food",
@@ -92,12 +93,162 @@ def get_unlabeled(df: pd.DataFrame, labeled: pd.DataFrame) -> pd.DataFrame:
     return df[mask].reset_index(drop=True)
 
 
+def load_budget_limits() -> dict:
+    import json
+    if BUDGET_JSON.exists():
+        with open(BUDGET_JSON) as f:
+            return json.load(f)
+    return {cat: 0.0 for cat in CATEGORIES}
+
+
+def save_budget_limits(limits: dict) -> None:
+    import json
+    BUDGET_JSON.parent.mkdir(parents=True, exist_ok=True)
+    with open(BUDGET_JSON, "w") as f:
+        json.dump(limits, f, indent=2)
+
+
+def get_month_data(month: str, view_mode: str, conf_threshold: float) -> pd.DataFrame:
+    df = build_viz_df(view_mode, conf_threshold)
+    if df.empty:
+        return pd.DataFrame()
+    return df[df["Date"] == month].copy()
+
+
+def build_budget_report(month_df: pd.DataFrame, limits: dict) -> pd.DataFrame:
+    spent_by_cat = (
+        month_df[month_df["Debit_amt"] > 0]
+        .groupby("Category")["Debit_amt"].sum()
+        .to_dict()
+    )
+    rows = []
+    for cat in CATEGORIES:
+        limit = float(limits.get(cat, 0.0))
+        spent = float(spent_by_cat.get(cat, 0.0))
+        remaining = limit - spent if limit > 0 else 0.0
+        pct = (spent / limit * 100) if limit > 0 else 0.0
+        if limit == 0:
+            status = "No limit"
+        elif spent >= limit:
+            status = "Over budget"
+        elif spent >= 0.8 * limit:
+            status = "Warning"
+        else:
+            status = "OK"
+        rows.append({
+            "Category": cat,
+            "Limit (MYR)": limit,
+            "Spent (MYR)": spent,
+            "Remaining (MYR)": remaining,
+            "% Used": round(pct, 1),
+            "Status": status,
+        })
+    return pd.DataFrame(rows)
+
+
+def generate_pdf_report(month: str, summary: dict, report_df: pd.DataFrame,
+                        top_tx: pd.DataFrame) -> bytes:
+    from fpdf import FPDF
+    from datetime import date
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # Title
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, f"Financial Report - {month}", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(0, 6, f"Generated: {date.today().strftime('%d %b %Y')}", align="C",
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    # Summary
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "Summary", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, f"Total Credits:  MYR {summary.get('credits', 0):,.2f}",
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Total Debits:   MYR {summary.get('debits', 0):,.2f}",
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Net:            MYR {summary.get('net', 0):,.2f}",
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    # Budget vs Actual table
+    limited = report_df[report_df["Limit (MYR)"] > 0]
+    if not limited.empty:
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 8, "Budget vs Actual", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "B", 9)
+        col_widths = [50, 30, 30, 35, 20, 25]
+        headers = ["Category", "Limit (MYR)", "Spent (MYR)", "Remaining (MYR)", "% Used", "Status"]
+        for w, h in zip(col_widths, headers):
+            pdf.cell(w, 7, h, border=1)
+        pdf.ln()
+        pdf.set_font("Helvetica", "", 9)
+        status_colors = {
+            "Over budget": (220, 50, 50),
+            "Warning": (200, 140, 0),
+            "OK": (30, 140, 50),
+            "No limit": (100, 100, 100),
+        }
+        for _, row in limited.iterrows():
+            r, g, b = status_colors.get(row["Status"], (0, 0, 0))
+            pdf.set_text_color(r, g, b)
+            pdf.cell(col_widths[0], 7, str(row["Category"])[:28], border=1)
+            pdf.set_text_color(0, 0, 0)
+            pdf.cell(col_widths[1], 7, f"{row['Limit (MYR)']:,.2f}", border=1, align="R")
+            pdf.cell(col_widths[2], 7, f"{row['Spent (MYR)']:,.2f}", border=1, align="R")
+            pdf.cell(col_widths[3], 7, f"{row['Remaining (MYR)']:,.2f}", border=1, align="R")
+            pdf.cell(col_widths[4], 7, f"{row['% Used']:.1f}%", border=1, align="R")
+            pdf.cell(col_widths[5], 7, str(row["Status"]), border=1)
+            pdf.ln()
+        pdf.ln(4)
+
+    # Exceeded limits
+    over = report_df[report_df["Status"] == "Over budget"]
+    if not over.empty:
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 8, "Exceeded Limits", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 10)
+        pdf.set_text_color(200, 0, 0)
+        for _, row in over.iterrows():
+            overage = row["Spent (MYR)"] - row["Limit (MYR)"]
+            pdf.cell(0, 6,
+                     f"  {row['Category']}: over by MYR {overage:,.2f}",
+                     new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(4)
+
+    # Top 10 transactions
+    if not top_tx.empty:
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 8, "Top 10 Transactions", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "B", 9)
+        tx_widths = [25, 55, 35, 30, 35]
+        tx_headers = ["Date", "Vendor", "Category", "Debit (MYR)", "Sale Type"]
+        for w, h in zip(tx_widths, tx_headers):
+            pdf.cell(w, 7, h, border=1)
+        pdf.ln()
+        pdf.set_font("Helvetica", "", 9)
+        for _, row in top_tx.iterrows():
+            pdf.cell(tx_widths[0], 7, str(row.get("Date", ""))[:12], border=1)
+            pdf.cell(tx_widths[1], 7, str(row.get("Vendor", ""))[:30], border=1)
+            pdf.cell(tx_widths[2], 7, str(row.get("Category", ""))[:20], border=1)
+            pdf.cell(tx_widths[3], 7, f"{row.get('Debit_amt', 0):,.2f}", border=1, align="R")
+            pdf.cell(tx_widths[4], 7, str(row.get("Sale Type", ""))[:20], border=1)
+            pdf.ln()
+
+    return bytes(pdf.output())
+
+
 # ── page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="Personal Finance", layout="wide", page_icon="💰")
 st.title("Personal Finance Manager")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Upload & Process", "Review", "Label", "Predict", "Visualise"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Upload & Process", "Review", "Label", "Predict", "Visualise", "Budget & Report"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -136,6 +287,7 @@ with tab1:
             status = st.empty()
             total_new = 0
             errors = []
+            skipped_months = []
 
             for idx, (f, month, year) in enumerate(file_configs):
                 status.info(f"Parsing {f.name} …")
@@ -154,8 +306,11 @@ with tab1:
 
                     df_parsed = clean_desc_robust(desc_list, amount_list)
                     month_label = f"{year}-{MONTH_MAP[month]}"
-                    save_to_db(df_parsed, month_label=month_label, db_path=str(DB_PATH))
-                    total_new += len(df_parsed)
+                    n_inserted = save_to_db(df_parsed, month_label=month_label, db_path=str(DB_PATH))
+                    if n_inserted == 0:
+                        skipped_months.append(month_label)
+                    else:
+                        total_new += n_inserted
                 except Exception as e:
                     errors.append(f"{f.name}: {e}")
 
@@ -168,9 +323,24 @@ with tab1:
                 if errors:
                     for err in errors:
                         st.error(err)
+                for m in skipped_months:
+                    st.warning(f"{m} already exists in the database — skipped to prevent duplicates.")
                 st.success(f"Done — {total_new} transactions added. CSV updated.")
             except Exception as e:
                 st.error(f"Preprocessor failed: {e}")
+
+    # Demo data loader
+    with st.expander("No bank statements? Try demo data"):
+        st.caption(
+            "Loads 6 months of synthetic Malaysian transactions (Oct 2024 – Mar 2025) "
+            "across all spending categories. Resets any existing data."
+        )
+        if st.button("Load Demo Data", type="secondary"):
+            from scripts.seed_demo_data import seed_demo_data
+            with st.spinner("Seeding demo data…"):
+                seed_demo_data()
+            st.success("Demo data loaded — 234 transactions across 6 months.")
+            st.rerun()
 
     # Show current DB stats
     df_current = load_transactions()
@@ -639,3 +809,193 @@ with tab5:
             width="stretch",
             hide_index=True,
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — Budget & Report
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab6:
+    st.header("Budget & Report")
+
+    # ── Section 1: Set Monthly Limits ────────────────────────────────────────
+    st.subheader("Set Monthly Limits")
+    st.caption("Set a monthly spending limit per category (MYR). Use 0 for no limit.")
+
+    current_limits = load_budget_limits()
+    new_limits = {}
+    for row_start in range(0, len(CATEGORIES), 3):
+        chunk = CATEGORIES[row_start:row_start + 3]
+        cols = st.columns(3)
+        for col, cat in zip(cols, chunk):
+            with col:
+                new_limits[cat] = st.number_input(
+                    cat, min_value=0.0,
+                    value=float(current_limits.get(cat, 0.0)),
+                    step=50.0, format="%.2f", key=f"budget_{cat}",
+                )
+
+    if st.button("Save Limits", type="primary"):
+        save_budget_limits(new_limits)
+        st.success("Budget limits saved.")
+        st.rerun()
+
+    st.divider()
+
+    # ── Section 2: Monthly Report ─────────────────────────────────────────────
+    st.subheader("Monthly Report")
+
+    labeled_for_report = load_labeled()
+    if labeled_for_report.empty:
+        st.info("No labeled data available. Label transactions in the Label tab first.")
+    else:
+        from ml.trainer import model_exists, MODEL_PATH
+
+        rpt_c1, rpt_c2, rpt_c3 = st.columns([2, 3, 2])
+
+        with rpt_c1:
+            month_opts = sorted(labeled_for_report["Date"].unique().tolist())
+            sel_month = st.selectbox("Month", month_opts, key="rpt_month")
+
+        with rpt_c2:
+            rpt_mode_opts = ["Labeled only"]
+            if model_exists(MODEL_PATH):
+                rpt_mode_opts += ["Predicted only", "Combined"]
+            view_mode_rpt = st.radio("Data source", rpt_mode_opts,
+                                     horizontal=True, key="rpt_view_mode")
+
+        with rpt_c3:
+            conf_rpt = 0.5
+            if view_mode_rpt != "Labeled only" and model_exists(MODEL_PATH):
+                conf_rpt = st.slider(
+                    "Confidence threshold", min_value=0.0, max_value=1.0,
+                    value=0.5, step=0.05, key="rpt_conf",
+                )
+
+        month_df = get_month_data(sel_month, view_mode_rpt, conf_rpt)
+
+        if month_df.empty:
+            st.info(f"No categorised transactions found for {sel_month}.")
+        else:
+            # Summary metrics
+            total_credits = month_df["Credit_amt"].sum()
+            total_debits = month_df["Debit_amt"].sum()
+            net = total_credits - total_debits
+            summary_dict = {"credits": total_credits, "debits": total_debits, "net": net}
+
+            sm1, sm2, sm3 = st.columns(3)
+            sm1.metric("Total Credits", f"MYR {total_credits:,.2f}")
+            sm2.metric("Total Debits", f"MYR {total_debits:,.2f}")
+            sm3.metric("Net", f"MYR {net:,.2f}", delta=f"{net:,.2f}")
+
+            limits_snapshot = load_budget_limits()
+            report_df = build_budget_report(month_df, limits_snapshot)
+
+            # Styled dataframe
+            def _status_color(val):
+                colors = {
+                    "Over budget": "background-color: #5c0000",
+                    "Warning": "background-color: #4a3800",
+                    "OK": "background-color: #0a2e0f",
+                    "No limit": "",
+                }
+                return colors.get(val, "")
+
+            try:
+                styled = report_df.style.map(_status_color, subset=["Status"])
+            except AttributeError:
+                styled = report_df.style.applymap(_status_color, subset=["Status"])
+
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+
+            # Progress bars for limited categories
+            limited_cats = report_df[report_df["Limit (MYR)"] > 0]
+            if not limited_cats.empty:
+                st.markdown("**Spending Progress**")
+                for _, prow in limited_cats.iterrows():
+                    pct = prow["% Used"] / 100
+                    label = (
+                        f"{prow['Category']}: MYR {prow['Spent (MYR)']:,.2f} "
+                        f"/ MYR {prow['Limit (MYR)']:,.2f} ({prow['% Used']:.1f}%)"
+                    )
+                    st.progress(min(pct, 1.0), text=label)
+
+            # Altair grouped bar chart
+            if not limited_cats.empty:
+                bar_data = pd.concat([
+                    limited_cats[["Category", "Limit (MYR)"]].rename(
+                        columns={"Limit (MYR)": "Amount"}).assign(Type="Limit"),
+                    limited_cats[["Category", "Spent (MYR)"]].rename(
+                        columns={"Spent (MYR)": "Amount"}).assign(Type="Spent"),
+                ], ignore_index=True)
+
+                budget_chart = (
+                    alt.Chart(bar_data)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X("Category:N", title=None),
+                        y=alt.Y("Amount:Q", title="Amount (MYR)"),
+                        xOffset="Type:N",
+                        color=alt.Color(
+                            "Type:N",
+                            scale=alt.Scale(
+                                domain=["Limit", "Spent"],
+                                range=["steelblue", "coral"],
+                            ),
+                        ),
+                        tooltip=[
+                            "Category",
+                            "Type",
+                            alt.Tooltip("Amount:Q", format=",.2f", title="MYR"),
+                        ],
+                    )
+                    .properties(height=300)
+                )
+                st.altair_chart(budget_chart, use_container_width=True)
+
+            # Exceeded limits alerts
+            over_budget = report_df[report_df["Status"] == "Over budget"]
+            if not over_budget.empty:
+                for _, orow in over_budget.iterrows():
+                    overage = orow["Spent (MYR)"] - orow["Limit (MYR)"]
+                    st.error(
+                        f"{orow['Category']}: over budget by MYR {overage:,.2f} "
+                        f"(limit MYR {orow['Limit (MYR)']:,.2f}, "
+                        f"spent MYR {orow['Spent (MYR)']:,.2f})"
+                    )
+            elif not limited_cats.empty:
+                st.success("All categories are within budget.")
+
+            # Top 10 transactions
+            st.markdown("**Top 10 Transactions**")
+            top10 = (
+                month_df[month_df["Debit_amt"] > 0]
+                .sort_values("Debit_amt", ascending=False)
+                .head(10)
+            )
+            if not top10.empty:
+                display_top = top10[["Date", "Vendor", "Category", "Debit_amt",
+                                     "Details", "Sale Type"]].rename(
+                    columns={"Debit_amt": "Debit (MYR)"}
+                )
+                st.dataframe(display_top, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # ── Section 3: Export PDF ─────────────────────────────────────────
+            st.subheader("Export Report")
+            if st.button("Export Report as PDF", type="primary"):
+                try:
+                    pdf_bytes = generate_pdf_report(
+                        sel_month, summary_dict, report_df, top10
+                    )
+                    st.download_button(
+                        "Download PDF",
+                        data=pdf_bytes,
+                        file_name=f"financial_report_{sel_month}.pdf",
+                        mime="application/pdf",
+                    )
+                except ImportError:
+                    st.error("fpdf2 not installed. Run: pip install fpdf2")
+                except Exception as e:
+                    st.error(f"PDF generation failed: {e}")
