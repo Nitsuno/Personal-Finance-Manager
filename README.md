@@ -9,6 +9,7 @@ A local Streamlit app for parsing Maybank bank statement PDFs, labeling transact
 - **Manual labeling** — label transactions one-by-one or in bulk by vendor
 - **ML classification** — TF-IDF + Logistic Regression trained on your labeled data; predicts categories for unlabeled transactions with confidence scores
 - **Visualise** — interactive Altair charts (spending by category, donut breakdown, monthly trend line) filterable by month and data source
+- **Budget & Report** — set monthly spending limits per category, view a budget vs actual report with progress bars and alerts, and export a PDF summary
 
 ## Tech Stack
 
@@ -17,7 +18,9 @@ A local Streamlit app for parsing Maybank bank statement PDFs, labeling transact
 - [pdfplumber](https://github.com/jsvine/pdfplumber) — PDF parsing
 - [pandas](https://pandas.pydata.org/) — data processing
 - [scikit-learn](https://scikit-learn.org/) — TF-IDF + Logistic Regression pipeline
+- [joblib](https://joblib.readthedocs.io/) — model serialization
 - [Altair](https://altair-viz.github.io/) — charts
+- [fpdf2](https://py-pdf.github.io/fpdf2/) — PDF report generation
 - SQLite — transaction storage
 
 ## Setup
@@ -42,16 +45,17 @@ Then open `http://localhost:8501` in your browser.
 
 ### Workflow
 
-1. **Upload & Process** — upload monthly PDF bank statements, assign month/year, click Process
+1. **Upload & Process** — upload monthly PDF bank statements, assign month/year, click Process; or load built-in demo data to explore the app without real PDFs
 2. **Review** — browse and filter all parsed transactions
 3. **Label** — assign categories to transactions (one-by-one or bulk by vendor)
 4. **Predict** — train the model once you have ≥10 labeled samples; run predictions on unlabeled data; accept high-confidence predictions as labels
 5. **Visualise** — explore spending charts filtered by month; toggle between labeled, predicted, or combined data
+6. **Budget & Report** — set per-category monthly limits, review a budget vs actual table with progress bars and over-budget alerts, export a PDF report
 
 ## Project Structure
 
 ```
-app.py                        — Streamlit UI (5 tabs)
+app.py                        — Streamlit UI (6 tabs)
 parsers/
   pdf_parser.py               — PDF → SQLite
 preprocessing/
@@ -64,6 +68,9 @@ db/
 data/
   to_label.csv                — all parsed transactions
   labeled.csv                 — transactions with user-assigned categories
+  budget_limits.json          — per-category monthly spending limits
+scripts/
+  seed_demo_data.py           — generates 6 months of synthetic demo transactions for testing
 ```
 
 ## Notes
