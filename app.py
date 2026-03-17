@@ -9,11 +9,7 @@ import streamlit as st
 BASE_DIR = Path(__file__).parent
 sys.path.insert(0, str(BASE_DIR))
 
-DATA_DIR = BASE_DIR / "data"
-DB_PATH = BASE_DIR / "db" / "statements.db"
-TO_LABEL_CSV = DATA_DIR / "to_label.csv"
-LABELED_CSV = DATA_DIR / "labeled.csv"
-BUDGET_JSON = DATA_DIR / "budget_limits.json"
+import db.postgres as pgdb
 
 CATEGORIES = [
     "Dining & Food",
@@ -37,23 +33,19 @@ MONTH_MAP = {m: f"{i+1:02d}" for i, m in enumerate(MONTHS)}
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def load_transactions() -> pd.DataFrame:
-    if TO_LABEL_CSV.exists():
-        return pd.read_csv(TO_LABEL_CSV)
-    return pd.DataFrame()
+    return pgdb.load_transactions()
 
 
 def load_labeled() -> pd.DataFrame:
-    if LABELED_CSV.exists():
-        return pd.read_csv(LABELED_CSV)
-    return pd.DataFrame()
+    return pgdb.load_labeled()
 
 
 def save_labeled(df: pd.DataFrame):
-    df.to_csv(LABELED_CSV, index=False)
+    pgdb.save_labeled_batch(df)
 
 
 def build_viz_df(view_mode: str, conf_threshold: float = 0.5) -> pd.DataFrame:
-    from ml.trainer import predict, model_exists, MODEL_PATH
+    from ml.trainer import predict, model_exists
     df = load_transactions()
     labeled = load_labeled()
 
@@ -62,9 +54,9 @@ def build_viz_df(view_mode: str, conf_threshold: float = 0.5) -> pd.DataFrame:
 
     if view_mode == "Predicted only":
         unlabeled = get_unlabeled(df, labeled)
-        if unlabeled.empty or not model_exists(MODEL_PATH):
+        if unlabeled.empty or not model_exists():
             return pd.DataFrame()
-        labels, scores = predict(unlabeled, MODEL_PATH)
+        labels, scores = predict(unlabeled)
         unlabeled = unlabeled.copy()
         unlabeled["Category"] = labels
         unlabeled["Confidence"] = scores
@@ -75,8 +67,8 @@ def build_viz_df(view_mode: str, conf_threshold: float = 0.5) -> pd.DataFrame:
     if not labeled.empty:
         parts.append(labeled.copy())
     unlabeled = get_unlabeled(df, labeled)
-    if not unlabeled.empty and model_exists(MODEL_PATH):
-        labels, scores = predict(unlabeled, MODEL_PATH)
+    if not unlabeled.empty and model_exists():
+        labels, scores = predict(unlabeled)
         unlabeled = unlabeled.copy()
         unlabeled["Category"] = labels
         unlabeled["Confidence"] = scores
@@ -94,18 +86,12 @@ def get_unlabeled(df: pd.DataFrame, labeled: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_budget_limits() -> dict:
-    import json
-    if BUDGET_JSON.exists():
-        with open(BUDGET_JSON) as f:
-            return json.load(f)
-    return {cat: 0.0 for cat in CATEGORIES}
+    raw = pgdb.load_budget_limits()
+    return {cat: raw.get(cat, 0.0) for cat in CATEGORIES}
 
 
 def save_budget_limits(limits: dict) -> None:
-    import json
-    BUDGET_JSON.parent.mkdir(parents=True, exist_ok=True)
-    with open(BUDGET_JSON, "w") as f:
-        json.dump(limits, f, indent=2)
+    pgdb.save_budget_limits(limits)
 
 
 def get_month_data(month: str, view_mode: str, conf_threshold: float) -> pd.DataFrame:
@@ -245,6 +231,7 @@ def generate_pdf_report(month: str, summary: dict, report_df: pd.DataFrame,
 
 # ── page config ───────────────────────────────────────────────────────────────
 
+pgdb.init_db()
 st.set_page_config(page_title="Personal Finance", layout="wide", page_icon="💰")
 st.title("Personal Finance Manager")
 
@@ -280,8 +267,8 @@ with tab1:
             file_configs.append((f, month, int(year)))
 
         if st.button("Process PDFs", type="primary"):
-            from parsers.pdf_parser import get_master_lists, clean_desc_robust, save_to_db
-            from preprocessing.preprocessor import run_preprocessing
+            from parsers.pdf_parser import get_master_lists, clean_desc_robust
+            from preprocessing.preprocessor import preprocess_df
 
             progress_bar = st.progress(0)
             status = st.empty()
@@ -306,7 +293,8 @@ with tab1:
 
                     df_parsed = clean_desc_robust(desc_list, amount_list)
                     month_label = f"{year}-{MONTH_MAP[month]}"
-                    n_inserted = save_to_db(df_parsed, month_label=month_label, db_path=str(DB_PATH))
+                    clean_df = preprocess_df(df_parsed)
+                    n_inserted = pgdb.save_transactions(clean_df, month_label)
                     if n_inserted == 0:
                         skipped_months.append(month_label)
                     else:
@@ -316,18 +304,14 @@ with tab1:
 
                 progress_bar.progress((idx + 1) / len(file_configs))
 
-            status.info("Running preprocessor …")
-            try:
-                run_preprocessing(db_path=DB_PATH)
-                status.empty()
-                if errors:
-                    for err in errors:
-                        st.error(err)
-                for m in skipped_months:
-                    st.warning(f"{m} already exists in the database — skipped to prevent duplicates.")
-                st.success(f"Done — {total_new} transactions added. CSV updated.")
-            except Exception as e:
-                st.error(f"Preprocessor failed: {e}")
+            status.empty()
+            if errors:
+                for err in errors:
+                    st.error(err)
+            for m in skipped_months:
+                st.warning(f"{m} already exists in the database — skipped to prevent duplicates.")
+            if total_new > 0:
+                st.success(f"Done — {total_new} transactions added.")
 
     # Demo data loader
     with st.expander("No bank statements? Try demo data"):
@@ -532,7 +516,7 @@ with tab3:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab4:
-    from ml.trainer import train, predict, model_exists, MODEL_PATH, CATEGORIES as ML_CATEGORIES
+    from ml.trainer import train, predict, model_exists, CATEGORIES as ML_CATEGORIES
 
     df = load_transactions()
     labeled_df = load_labeled()
@@ -650,11 +634,11 @@ with tab4:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab5:
-    from ml.trainer import model_exists, MODEL_PATH
+    from ml.trainer import model_exists
 
     st.header("Spending Visualisation")
 
-    has_model = model_exists(MODEL_PATH)
+    has_model = model_exists()
 
     # ── Controls ──────────────────────────────────────────────────────────────
     ctrl1, ctrl2, ctrl3 = st.columns([2, 3, 2])
@@ -849,7 +833,7 @@ with tab6:
     if labeled_for_report.empty:
         st.info("No labeled data available. Label transactions in the Label tab first.")
     else:
-        from ml.trainer import model_exists, MODEL_PATH
+        from ml.trainer import model_exists
 
         rpt_c1, rpt_c2, rpt_c3 = st.columns([2, 3, 2])
 
@@ -859,14 +843,14 @@ with tab6:
 
         with rpt_c2:
             rpt_mode_opts = ["Labeled only"]
-            if model_exists(MODEL_PATH):
+            if model_exists():
                 rpt_mode_opts += ["Predicted only", "Combined"]
             view_mode_rpt = st.radio("Data source", rpt_mode_opts,
                                      horizontal=True, key="rpt_view_mode")
 
         with rpt_c3:
             conf_rpt = 0.5
-            if view_mode_rpt != "Labeled only" and model_exists(MODEL_PATH):
+            if view_mode_rpt != "Labeled only" and model_exists():
                 conf_rpt = st.slider(
                     "Confidence threshold", min_value=0.0, max_value=1.0,
                     value=0.5, step=0.05, key="rpt_conf",

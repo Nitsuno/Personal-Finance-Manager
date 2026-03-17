@@ -1,6 +1,6 @@
 # Personal Finance Manager
 
-A local Streamlit app for parsing Maybank bank statement PDFs, labeling transactions by category, training an ML classifier, and visualising spending patterns — all without sending data to any external service.
+A Streamlit app for parsing Maybank bank statement PDFs, labeling transactions by category, training an ML classifier, and visualising spending patterns. Deployable to [Railway](https://railway.app/) with PostgreSQL for persistent storage.
 
 ## Features
 
@@ -13,7 +13,7 @@ A local Streamlit app for parsing Maybank bank statement PDFs, labeling transact
 
 ## Tech Stack
 
-- Python 3
+- Python 3.12
 - [Streamlit](https://streamlit.io/) — UI
 - [pdfplumber](https://github.com/jsvine/pdfplumber) — PDF parsing
 - [pandas](https://pandas.pydata.org/) — data processing
@@ -21,9 +21,10 @@ A local Streamlit app for parsing Maybank bank statement PDFs, labeling transact
 - [joblib](https://joblib.readthedocs.io/) — model serialization
 - [Altair](https://altair-viz.github.io/) — charts
 - [fpdf2](https://py-pdf.github.io/fpdf2/) — PDF report generation
-- SQLite — transaction storage
+- [psycopg2](https://www.psycopg.org/) — PostgreSQL driver
+- PostgreSQL — persistent storage (transactions, labels, model, budget limits)
 
-## Setup
+## Local Development
 
 ```bash
 git clone <repo-url>
@@ -31,21 +32,43 @@ cd personal-finance
 
 python -m venv venv
 source venv/bin/activate
-
 pip install -r requirements.txt
 ```
 
-## Usage
+Set the `DATABASE_URL` environment variable pointing to a local or remote PostgreSQL instance:
 
 ```bash
+export DATABASE_URL="postgresql://user:password@localhost:5432/personal_finance"
 streamlit run app.py
 ```
 
-Then open `http://localhost:8501` in your browser.
+The app creates all required tables on startup via `db/postgres.py:init_db()`.
 
-### Workflow
+### Demo Data
 
-1. **Upload & Process** — upload monthly PDF bank statements, assign month/year, click Process; or load built-in demo data to explore the app without real PDFs
+No bank statements? Use the built-in demo data loader in the **Upload & Process** tab — it seeds 6 months of synthetic Malaysian transactions (Oct 2024 – Mar 2025) across all spending categories.
+
+## Docker
+
+```bash
+docker build -t personal-finance .
+docker run -p 8501:8501 -e DATABASE_URL="postgresql://..." personal-finance
+```
+
+Open `http://localhost:8501`.
+
+## Railway Deployment
+
+1. Push the repo to GitHub
+2. Create a new Railway project → **Deploy from GitHub repo**
+3. Add a **PostgreSQL** service to the project (Railway UI)
+4. Railway auto-sets `DATABASE_URL` in the app service's environment
+5. Railway reads the `Dockerfile`, builds the image, and deploys — `PORT` is injected automatically
+6. App is live at `<project>.railway.app`
+
+## Workflow
+
+1. **Upload & Process** — upload monthly PDF bank statements, assign month/year, click Process; or load built-in demo data
 2. **Review** — browse and filter all parsed transactions
 3. **Label** — assign categories to transactions (one-by-one or bulk by vendor)
 4. **Predict** — train the model once you have ≥10 labeled samples; run predictions on unlabeled data; accept high-confidence predictions as labels
@@ -56,25 +79,21 @@ Then open `http://localhost:8501` in your browser.
 
 ```
 app.py                        — Streamlit UI (6 tabs)
-parsers/
-  pdf_parser.py               — PDF → SQLite
-preprocessing/
-  preprocessor.py             — SQLite → data/to_label.csv
-ml/
-  trainer.py                  — train(), predict(), model_exists()
-  model.pkl                   — saved model (generated after first train)
+Dockerfile                    — Railway/Docker build config
 db/
-  statements.db               — SQLite database
-data/
-  to_label.csv                — all parsed transactions
-  labeled.csv                 — transactions with user-assigned categories
-  budget_limits.json          — per-category monthly spending limits
+  postgres.py                 — PostgreSQL adapter (all DB I/O)
+parsers/
+  pdf_parser.py               — PDF → raw transaction DataFrame
+preprocessing/
+  preprocessor.py             — preprocess_df() + run_preprocessing() (SQLite CLI path)
+ml/
+  trainer.py                  — train(), predict(), model_exists() — model stored in PostgreSQL
 scripts/
-  seed_demo_data.py           — generates 6 months of synthetic demo transactions for testing
+  seed_demo_data.py           — generates 6 months of synthetic demo transactions
 ```
 
 ## Notes
 
-- All data stays local — no cloud services involved
-- Avoid uploading the same month's PDF twice (creates duplicate rows in the DB)
-- The ML model only trains on the canonical category list; the Visualise tab shows all categories including any custom ones added during labeling
+- Avoid uploading the same month's PDF twice — the app guards against duplicate months at insert time
+- The ML model is stored as a BYTEA blob in PostgreSQL alongside all other state; container restarts do not lose data
+- The ML model only trains on the canonical category list; the Visualise tab shows all categories found in data including any custom ones added during labeling

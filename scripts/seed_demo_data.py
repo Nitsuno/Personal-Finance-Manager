@@ -1,5 +1,4 @@
 import sys
-import json
 import random
 from pathlib import Path
 
@@ -8,14 +7,8 @@ import pandas as pd
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from parsers.pdf_parser import save_to_db
-from preprocessing.preprocessor import run_preprocessing
-
-DB_PATH = BASE_DIR / "db" / "statements.db"
-DATA_DIR = BASE_DIR / "data"
-TO_LABEL_CSV = DATA_DIR / "to_label.csv"
-LABELED_CSV = DATA_DIR / "labeled.csv"
-BUDGET_JSON = DATA_DIR / "budget_limits.json"
+import db.postgres as pgdb
+from preprocessing.preprocessor import preprocess_df
 
 MONTHS = ["2024-10", "2024-11", "2024-12", "2025-01", "2025-02", "2025-03"]
 LABEL_MONTHS = {"2024-10", "2024-11", "2024-12", "2025-01"}
@@ -174,16 +167,9 @@ def generate_transactions() -> list[dict]:
 
 
 def seed_demo_data():
-    # Wipe existing data
-    if DB_PATH.exists():
-        DB_PATH.unlink()
-    if TO_LABEL_CSV.exists():
-        TO_LABEL_CSV.unlink()
-    if LABELED_CSV.exists():
-        LABELED_CSV.unlink()
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Wipe existing data and reinitialise schema
+    pgdb.init_db()
+    pgdb.clear_all()
 
     # Generate and insert transactions month by month
     rows = generate_transactions()
@@ -195,21 +181,18 @@ def seed_demo_data():
             .drop(columns=["_month"])
             .reset_index(drop=True)
         )
-        save_to_db(month_df, month_label=month, db_path=str(DB_PATH))
+        clean_df = preprocess_df(month_df)
+        pgdb.save_transactions(clean_df, month_label=month)
 
-    # Regenerate to_label.csv from DB
-    run_preprocessing(db_path=DB_PATH, out_csv=TO_LABEL_CSV)
-
-    # Build labeled.csv: label transactions from the first 4 months (~67%)
-    to_label_df = pd.read_csv(TO_LABEL_CSV)
+    # Build labeled data: label transactions from the first 4 months (~67%)
+    to_label_df = pgdb.load_transactions()
     labeled_df = to_label_df[to_label_df["Date"].isin(LABEL_MONTHS)].copy()
     labeled_df["Category"] = labeled_df["Vendor"].map(VENDOR_CATEGORY)
     labeled_df.dropna(subset=["Category"], inplace=True)
-    labeled_df.to_csv(LABELED_CSV, index=False)
+    pgdb.save_labeled_batch(labeled_df)
 
     # Write demo budget limits
-    with open(BUDGET_JSON, "w") as f:
-        json.dump(BUDGET_LIMITS, f, indent=2)
+    pgdb.save_budget_limits(BUDGET_LIMITS)
 
     total = len(to_label_df)
     n_labeled = len(labeled_df)

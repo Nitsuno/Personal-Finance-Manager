@@ -1,6 +1,3 @@
-from pathlib import Path
-
-import joblib
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
@@ -8,9 +5,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import StratifiedKFold, cross_validate
 from sklearn.pipeline import Pipeline
 
-BASE_DIR = Path(__file__).parent.parent
-MODEL_PATH = BASE_DIR / "ml" / "model.pkl"
-LABELED_CSV = BASE_DIR / "data" / "labeled.csv"
+import db.postgres as pgdb
 
 CATEGORIES = [
     "Dining & Food",
@@ -36,9 +31,9 @@ def build_text_features(df: pd.DataFrame) -> pd.Series:
     )
 
 
-def train(labeled_csv: Path = LABELED_CSV, model_path: Path = MODEL_PATH) -> dict:
-    """Train the classifier on labeled data and save to disk. Returns metrics."""
-    df = pd.read_csv(labeled_csv)
+def train() -> dict:
+    """Train the classifier on labeled data stored in PostgreSQL. Returns metrics."""
+    df = pgdb.load_labeled()
     df = df[df["Category"].isin(CATEGORIES)].copy()
 
     if len(df) < 10:
@@ -75,10 +70,9 @@ def train(labeled_csv: Path = LABELED_CSV, model_path: Path = MODEL_PATH) -> dic
     else:
         cv_accuracy = cv_f1 = None
 
-    # Fit on all data and save
+    # Fit on all data and save to PostgreSQL
     pipe.fit(X, y)
-    model_path.parent.mkdir(exist_ok=True)
-    joblib.dump(pipe, model_path)
+    pgdb.save_model(pipe)
 
     return {
         "n_samples": len(df),
@@ -90,12 +84,14 @@ def train(labeled_csv: Path = LABELED_CSV, model_path: Path = MODEL_PATH) -> dic
     }
 
 
-def predict(df: pd.DataFrame, model_path: Path = MODEL_PATH):
+def predict(df: pd.DataFrame):
     """
     Returns (predicted_labels, confidence_scores) arrays aligned with df.
-    Raises FileNotFoundError if model hasn't been trained yet.
+    Raises ValueError if model hasn't been trained yet.
     """
-    pipe = joblib.load(model_path)
+    pipe = pgdb.load_model()
+    if pipe is None:
+        raise ValueError("No trained model found. Train one first.")
     X = build_text_features(df)
     labels = pipe.predict(X)
     proba = pipe.predict_proba(X)
@@ -103,5 +99,5 @@ def predict(df: pd.DataFrame, model_path: Path = MODEL_PATH):
     return labels, confidence
 
 
-def model_exists(model_path: Path = MODEL_PATH) -> bool:
-    return model_path.exists()
+def model_exists() -> bool:
+    return pgdb.model_exists()
