@@ -10,6 +10,7 @@ BASE_DIR = Path(__file__).parent
 sys.path.insert(0, str(BASE_DIR))
 
 import db.postgres as pgdb
+from utils.filename import parse_month_label
 
 CATEGORIES = [
     "Dining & Food",
@@ -253,20 +254,25 @@ with tab1:
     )
 
     if uploaded_files:
-        st.subheader("Assign months")
-        file_configs = []
-        for f in uploaded_files:
-            col_name, col_month, col_year = st.columns([3, 2, 2])
+        st.info(
+            "Name your files with a 3-letter month and 4-digit year, "
+            "e.g. Jan2025.pdf or statement_Mar_2025.pdf"
+        )
+
+        parsed = [(f, *parse_month_label(f.name)) for f in uploaded_files]
+        all_ok = all(label is not None for _, label, _ in parsed)
+
+        for f, label, err in parsed:
+            col_name, col_result = st.columns([3, 2])
             with col_name:
                 st.markdown(f"**{f.name}**")
-            with col_month:
-                month = st.selectbox("Month", MONTHS, key=f"month_{f.name}")
-            with col_year:
-                year = st.number_input("Year", min_value=2020, max_value=2030,
-                                       value=2025, key=f"year_{f.name}")
-            file_configs.append((f, month, int(year)))
+            with col_result:
+                if label:
+                    st.success(f"{label} \u2713")
+                else:
+                    st.error(f"{err} \u2717")
 
-        if st.button("Process PDFs", type="primary"):
+        if st.button("Process PDFs", type="primary", disabled=not all_ok):
             from parsers.pdf_parser import get_master_lists, clean_desc_robust
             from preprocessing.preprocessor import preprocess_df
 
@@ -276,7 +282,7 @@ with tab1:
             errors = []
             skipped_months = []
 
-            for idx, (f, month, year) in enumerate(file_configs):
+            for idx, (f, month_label, _) in enumerate(parsed):
                 status.info(f"Parsing {f.name} …")
                 try:
                     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
@@ -292,7 +298,6 @@ with tab1:
                             desc_list.pop()
 
                     df_parsed = clean_desc_robust(desc_list, amount_list)
-                    month_label = f"{year}-{MONTH_MAP[month]}"
                     clean_df = preprocess_df(df_parsed)
                     n_inserted = pgdb.save_transactions(clean_df, month_label)
                     if n_inserted == 0:
@@ -302,7 +307,7 @@ with tab1:
                 except Exception as e:
                     errors.append(f"{f.name}: {e}")
 
-                progress_bar.progress((idx + 1) / len(file_configs))
+                progress_bar.progress((idx + 1) / len(parsed))
 
             status.empty()
             if errors:
@@ -325,6 +330,27 @@ with tab1:
                 seed_demo_data()
             st.success("Demo data loaded — 234 transactions across 6 months.")
             st.rerun()
+
+    # Danger zone
+    with st.expander("⚠️ Danger zone"):
+        st.caption("Permanently deletes all transactions, labels, budget limits, and the trained model.")
+        if not st.session_state.get("confirm_clear"):
+            if st.button("Clear All Data", type="primary"):
+                st.session_state["confirm_clear"] = True
+                st.rerun()
+        else:
+            st.warning("This will wipe everything. Are you sure?")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Yes, delete everything", type="primary"):
+                    pgdb.clear_all()
+                    st.session_state["confirm_clear"] = False
+                    st.success("All data cleared.")
+                    st.rerun()
+            with col2:
+                if st.button("Cancel"):
+                    st.session_state["confirm_clear"] = False
+                    st.rerun()
 
     # Show current DB stats
     df_current = load_transactions()
