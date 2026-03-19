@@ -91,5 +91,6 @@ def test_both_missing():
 def test_both_missing_joined_with_space_not_newline():
     label, err = parse_month_label("doc_98271.pdf")
     assert "\n" not in err
+    assert "etc. Could" in err  # confirms single-space separator between the two messages
     # Month error must come before year error
     assert err.index("Could not detect a month") < err.index("Could not detect a year")
