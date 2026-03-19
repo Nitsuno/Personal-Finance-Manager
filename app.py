@@ -26,10 +26,6 @@ CATEGORIES = [
     "Other",
 ]
 
-MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-MONTH_MAP = {m: f"{i+1:02d}" for i, m in enumerate(MONTHS)}
-
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
